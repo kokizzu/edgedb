@@ -1164,6 +1164,21 @@ class FunctionCommand(
 
         return compiled
 
+    @classmethod
+    def _ignorenames_from_ast(
+        cls,
+        schema: s_schema.Schema,
+        astnode: qlast.DDLOperation,
+        context: sd.CommandContext,
+    ) -> Set[str]:
+        ignorenames = super(FunctionCommand, cls)._ignorenames_from_ast(
+            schema, astnode, context
+        )
+        if isinstance(astnode, (qlast.CreateFunction, qlast.AlterFunction)):
+            ignorenames |= {param.name for param in astnode.params}
+
+        return ignorenames
+
 
 class CreateFunction(CreateCallableObject[Function], FunctionCommand):
     astnode = qlast.CreateFunction
@@ -1348,8 +1363,8 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
         context: sd.CommandContext,
     ) -> sd.Command:
         cmd = super()._cmd_tree_from_ast(schema, astnode, context)
-        assert isinstance(astnode, qlast.CreateFunction)
 
+        assert isinstance(astnode, qlast.CreateFunction)
         if astnode.code is not None:
             cmd.set_attribute_value(
                 'language',
@@ -1365,6 +1380,7 @@ class CreateFunction(CreateCallableObject[Function], FunctionCommand):
                     nativecode_expr,
                     schema,
                     context.modaliases,
+                    context.ignorenames,
                 )
 
                 cmd.set_attribute_value(
@@ -1492,6 +1508,7 @@ class AlterFunction(AlterCallableObject[Function], FunctionCommand):
                     nativecode_expr,
                     schema,
                     context.modaliases,
+                    context.ignorenames,
                 )
 
                 cmd.set_attribute_value(

@@ -4108,7 +4108,8 @@ class TestEdgeQLDDL(tb.DDLTestCase):
         # Issue #1187
         with self.assertRaisesRegex(
                 edgedb.SchemaDefinitionError,
-                "illegal self-reference in definition of 'IllegalAlias07'"):
+                "illegal self-reference in definition of "
+                "'test::IllegalAlias07'"):
 
             await self.con.execute(r"""
                 WITH MODULE test
