@@ -126,6 +126,7 @@ def compile_cast(
             with ctx.new() as subctx:
                 subctx.implicit_id_in_shapes = False
                 subctx.implicit_tid_in_shapes = False
+                subctx.implicit_tname_in_shapes = False
                 viewgen.compile_view_shapes(ir_set, ctx=subctx)
 
         return _compile_cast(

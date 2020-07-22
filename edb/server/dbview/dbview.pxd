@@ -75,9 +75,11 @@ cdef class DatabaseConnectionView:
 
     cdef cache_compiled_query(self, str eql, object io_format,
                               bint expect_one, int implicit_limit,
+                              bint inline_typenames,
                               query_unit)
     cdef lookup_compiled_query(self, str eql, object io_format,
-                               bint expect_one, int implicit_limit)
+                               bint expect_one, int implicit_limit,
+                               bint inline_typenames)
 
     cdef tx_error(self)
 

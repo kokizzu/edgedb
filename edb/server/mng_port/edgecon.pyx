@@ -99,6 +99,7 @@ cdef object logger = logging.getLogger('edb.server')
 cdef object log_metrics = logging.getLogger('edb.server.metrics')
 
 DEF QUERY_OPT_IMPLICIT_LIMIT = 0xFF01
+DEF QUERY_OPT_INLINE_TYPENAMES = 0xFF02
 
 @cython.final
 cdef class CompiledQuery:
@@ -620,6 +621,7 @@ cdef class EdgeConnection:
         expect_one: bint = False,
         stmt_mode: str = 'single',
         implicit_limit: uint64_t = 0,
+        inline_typenames: bool = False,
         first_extracted_var: Optional[int] = None,
     ):
         if self.dbview.in_tx_error():
@@ -633,6 +635,7 @@ cdef class EdgeConnection:
                 io_format,
                 expect_one,
                 implicit_limit,
+                inline_typenames,
                 stmt_mode,
                 first_extracted_var,
             )
@@ -646,6 +649,7 @@ cdef class EdgeConnection:
                 io_format,
                 expect_one,
                 implicit_limit,
+                inline_typenames,
                 stmt_mode,
                 CAP_ALL,
                 first_extracted_var,
@@ -776,6 +780,7 @@ cdef class EdgeConnection:
         object io_format,
         bint expect_one,
         uint64_t implicit_limit,
+        bint inline_typenames,
     ) -> CompiledQuery:
         if self.debug:
             self.debug_print('PARSE', eql)
@@ -789,7 +794,8 @@ cdef class EdgeConnection:
                              'after', normalized.first_extra())
 
         query_unit = self.dbview.lookup_compiled_query(
-            normalized.key(), io_format, expect_one, implicit_limit)
+            normalized.key(), io_format, expect_one,
+            implicit_limit, inline_typenames)
         cached = True
         if query_unit is None:
             # Cache miss; need to compile this query.
@@ -812,6 +818,7 @@ cdef class EdgeConnection:
                         expect_one=expect_one,
                         stmt_mode='single',
                         implicit_limit=implicit_limit,
+                        inline_typenames=inline_typenames,
                         first_extracted_var=normalized.first_extra(),
                     )
                 query_unit = query_unit[0]
@@ -836,7 +843,7 @@ cdef class EdgeConnection:
         if not cached and query_unit.cacheable:
             self.dbview.cache_compiled_query(
                 normalized.key(), io_format, expect_one,
-                implicit_limit, query_unit)
+                implicit_limit, inline_typenames, query_unit)
 
         return CompiledQuery(
             query_unit=query_unit,
@@ -932,6 +939,7 @@ cdef class EdgeConnection:
             bytes eql
             dict headers
             uint64_t implicit_limit = 0
+            bint inline_typenames = False
 
         self._last_anon_compiled = None
 
@@ -940,6 +948,8 @@ cdef class EdgeConnection:
             for k, v in headers.items():
                 if k == QUERY_OPT_IMPLICIT_LIMIT:
                     implicit_limit = self._parse_implicit_limit(v)
+                elif k == QUERY_OPT_INLINE_TYPENAMES:
+                    inline_typenames = v.lower() == b'true'
                 else:
                     raise errors.BinaryProtocolError(
                         f'unexpected message header: {k}'
@@ -960,7 +970,7 @@ cdef class EdgeConnection:
             raise errors.BinaryProtocolError('empty query')
 
         compiled_query = await self._parse(
-            eql, io_format, expect_one, implicit_limit)
+            eql, io_format, expect_one, implicit_limit, inline_typenames)
 
         buf = WriteBuffer.new_message(b'1')  # ParseComplete
         buf.write_int16(0)  # no headers
@@ -1219,6 +1229,7 @@ cdef class EdgeConnection:
             bytes out_tid
             bytes bound_args
             uint64_t implicit_limit = 0
+            bint inline_typenames = False
 
         self._last_anon_compiled = None
 
@@ -1227,6 +1238,8 @@ cdef class EdgeConnection:
             for k, v in headers.items():
                 if k == QUERY_OPT_IMPLICIT_LIMIT:
                     implicit_limit = self._parse_implicit_limit(v)
+                elif k == QUERY_OPT_INLINE_TYPENAMES:
+                    inline_typenames = v.lower() == b'true'
                 else:
                     raise errors.BinaryProtocolError(
                         f'unexpected message header: {k}'
@@ -1247,13 +1260,14 @@ cdef class EdgeConnection:
 
         normalized = normalize(query)
         query_unit = self.dbview.lookup_compiled_query(
-            normalized.key(), io_format, expect_one, implicit_limit)
+            normalized.key(), io_format, expect_one,
+            implicit_limit, inline_typenames)
         if query_unit is None:
             if self.debug:
                 self.debug_print('OPTIMISTIC EXECUTE /REPARSE', query)
 
             compiled = await self._parse(
-                query, io_format, expect_one, implicit_limit)
+                query, io_format, expect_one, implicit_limit, inline_typenames)
             self._last_anon_compiled = compiled
             query_unit = compiled.query_unit
         else:
@@ -1277,7 +1291,7 @@ cdef class EdgeConnection:
             # Otherwise the `await self._execute` below would execute
             # some other query.
             compiled = await self._parse(
-                query, io_format, expect_one, implicit_limit)
+                query, io_format, expect_one, implicit_limit, inline_typenames)
             self._last_anon_compiled = compiled
             return
 

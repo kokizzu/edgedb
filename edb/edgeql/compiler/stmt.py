@@ -277,6 +277,7 @@ def compile_InsertQuery(
 
             bodyctx.implicit_id_in_shapes = False
             bodyctx.implicit_tid_in_shapes = False
+            bodyctx.implicit_tname_in_shapes = False
             bodyctx.implicit_limit = 0
 
             stmt.subject = compile_query_subject(
@@ -345,6 +346,7 @@ def compile_UpdateQuery(
         with ictx.new() as bodyctx:
             bodyctx.implicit_id_in_shapes = False
             bodyctx.implicit_tid_in_shapes = False
+            bodyctx.implicit_tname_in_shapes = False
             bodyctx.implicit_limit = 0
 
             stmt.subject = compile_query_subject(
@@ -445,6 +447,7 @@ def compile_DeleteQuery(
         with ictx.new() as bodyctx:
             bodyctx.implicit_id_in_shapes = False
             bodyctx.implicit_tid_in_shapes = False
+            bodyctx.implicit_tname_in_shapes = False
             stmt.subject = compile_query_subject(
                 subject,
                 shape=None,
@@ -946,7 +949,7 @@ def compile_query_subject(
 
     if (
         ctx.expr_exposed
-        and viewgen.has_implicit_tid(
+        and viewgen.has_implicit_type_computables(
             expr_stype,
             is_mutation=is_insert or is_update or is_delete,
             ctx=ctx,

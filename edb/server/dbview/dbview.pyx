@@ -169,11 +169,12 @@ cdef class DatabaseConnectionView:
         return self._tx_error
 
     cdef cache_compiled_query(self, str eql, object io_format,
-                              bint expect_one, int implicit_limit, query_unit):
+                              bint expect_one, int implicit_limit,
+                              bint inline_typenames, query_unit):
 
         assert query_unit.cacheable
 
-        key = (eql, io_format, expect_one, implicit_limit,
+        key = (eql, io_format, expect_one, implicit_limit, inline_typenames,
                self._modaliases, self._config)
 
         if self._in_tx_with_ddl:
@@ -182,13 +183,14 @@ cdef class DatabaseConnectionView:
             self._db._cache_compiled_query(key, query_unit)
 
     cdef lookup_compiled_query(self, str eql, object io_format,
-                               bint expect_one, int implicit_limit):
+                               bint expect_one, int implicit_limit,
+                               bint inline_typenames):
         if (self._tx_error or
                 not self._query_cache_enabled or
                 self._in_tx_with_ddl):
             return None
 
-        key = (eql, io_format, expect_one, implicit_limit,
+        key = (eql, io_format, expect_one, implicit_limit, inline_typenames,
                self._modaliases, self._config)
 
         if self._in_tx_with_ddl or self._in_tx_with_set:
