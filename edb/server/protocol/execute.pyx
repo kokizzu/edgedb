@@ -208,6 +208,8 @@ async def _parse(
         dbname=db.name,
         query_cache=query_cache_enabled,
         protocol_version=edbdef.CURRENT_PROTOCOL,
+        # TODO: This should change
+        role_name=edbdef.EDGEDB_SUPERUSER,
     )
     dbv.is_transient = True
     if use_metrics:
@@ -311,7 +313,12 @@ async def execute(
 
                     data_types = []
                     bound_args_buf = args_ser.recode_bind_args(
-                        dbv, compiled, bind_args, converted_args, None, data_types,
+                        dbv,
+                        compiled,
+                        bind_args,
+                        converted_args,
+                        None,
+                        data_types,
                     )
 
                     assert not (query_unit.database_config
@@ -1035,6 +1042,23 @@ async def execute_json(
     tx_isolation: edbdef.TxIsolationLevel | None = None,
     query_req: Optional[rpc.CompilationRequest] = None,
 ) -> bytes:
+    if compiled.query_unit_group.json_permissions:
+        # Inject any required permissions into the globals json.
+        if globals_ is None:
+            globals_ = {}
+
+        superuser, available_permissions = dbv.get_permissions()
+
+        for permission in compiled.query_unit_group.json_permissions:
+            if permission in globals_:
+                raise RuntimeError(
+                    f"Permission cannot be passed as globals: '{permission}'"
+                )
+
+            globals_[permission] = (
+                superuser or permission in available_permissions
+            )
+
     dbv.set_globals(immutables.Map({
         "__::__edb_json_globals__": config.SettingValue(
             name="__::__edb_json_globals__",
