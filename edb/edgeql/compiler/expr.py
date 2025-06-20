@@ -47,7 +47,6 @@ from edb.schema import scalars as s_scalars
 from edb.schema import schema as s_schema
 from edb.schema import types as s_types
 from edb.schema import utils as s_utils
-from edb.schema import expr as s_expr
 
 from edb.edgeql import ast as qlast
 
@@ -56,6 +55,7 @@ from . import casts
 from . import context
 from . import dispatch
 from . import pathctx
+from . import schemactx
 from . import setgen
 from . import stmt
 from . import tuple_args
@@ -548,6 +548,37 @@ def compile_UnaryOp(
         expr, op_name=expr.op, qlargs=[expr.operand], ctx=ctx)
 
 
+def _cache_as_type_rewrite(
+    target: irast.Set,
+    stype: s_types.Type,
+    populate: Callable[[], irast.Set],
+    *,
+    ctx: context.ContextLevel,
+) -> irast.Set:
+    key = (stype, False)
+    if not ctx.env.type_rewrites.get(key):
+        ctx.env.type_rewrites[key] = populate()
+    rewrite_target = ctx.env.type_rewrites[key]
+
+    # We need to have the set with expr=None, so that the rewrite
+    # will be applied, but we also need to wrap it with a
+    # card_inference_override so that we use the real cardinality
+    # instead of assuming it is MANY.
+    assert isinstance(rewrite_target, irast.Set)
+    typeref = typegen.type_to_typeref(stype, env=ctx.env)
+    target = setgen.new_set_from_set(
+        target,
+        expr=irast.TypeRoot(typeref=typeref, is_cached_global=True),
+        stype=stype,
+        ctx=ctx,
+    )
+    wrap = irast.SelectStmt(
+        result=target,
+        card_inference_override=rewrite_target,
+    )
+    return setgen.new_set_from_set(target, expr=wrap, ctx=ctx)
+
+
 @dispatch.compile.register(qlast.GlobalExpr)
 def compile_GlobalExpr(
     expr: qlast.GlobalExpr, *, ctx: context.ContextLevel
@@ -555,7 +586,7 @@ def compile_GlobalExpr(
     # The expr object can be either a Permission or Global.
     # Get an Object and manually check for correct type and None.
     expr_schema_name = s_utils.ast_ref_to_name(expr.name)
-    expr_obj = ctx.env.get_schema_object_and_track(
+    glob = ctx.env.get_schema_object_and_track(
         expr_schema_name,
         expr.name,
         default=None,
@@ -564,7 +595,7 @@ def compile_GlobalExpr(
     )
 
     # Check for None first.
-    if expr_obj is None:
+    if glob is None:
         # If no object is found, we want to raise an error with 'global' as
         # the desired type.
         # If we let `get_schema_object_and_track`, the error will contain
@@ -576,34 +607,23 @@ def compile_GlobalExpr(
             type=s_globals.Global,
         )
 
-    # Check for permission
-    if isinstance(expr_obj, s_permissions.Permission):
-        std_type = sn.QualName('std', 'bool')
-        ct = typegen.type_to_typeref(
-            ctx.env.get_schema_type_and_track(std_type),
-            env=ctx.env,
-        )
-        ir_expr = irast.BooleanConstant(
-            value="false", typeref=ct, span=expr.span
-        )
-        return setgen.ensure_set(ir_expr, ctx=ctx)
-
-    # Check for non-global
-    if not isinstance(expr_obj, s_globals.Global):
+    # Check for incorrect type
+    if not isinstance(glob, (s_globals.Global, s_permissions.Permission)):
         s_schema.Schema.raise_wrong_type(
             expr_schema_name,
-            expr_obj.__class__,
+            glob.__class__,
             s_globals.Global,
             span=expr.span,
         )
         # Raise an error here so mypy knows that expr_obj can only be a global
-        # past this point.
+        # or permission past this point.
         raise AssertionError('should never happen')
 
-    # Non-permission global
-    glob = expr_obj
-
-    if glob.is_computable(ctx.env.schema):
+    if (
+        # Computed global
+        isinstance(glob, s_globals.Global)
+        and glob.is_computable(ctx.env.schema)
+    ):
         obj_ref = s_utils.name_to_ast_ref(
             glob.get_target(ctx.env.schema).get_name(ctx.env.schema))
         # Wrap the reference in a subquery so that it does not get
@@ -614,46 +634,39 @@ def compile_GlobalExpr(
         # If the global is single, use type_rewrites to make sure it
         # is computed only once in the SQL query.
         if glob.get_cardinality(ctx.env.schema).is_single():
-            key = (setgen.get_set_type(target, ctx=ctx), False)
-            if not ctx.env.type_rewrites.get(key):
+            def _populate() -> irast.Set:
                 with ctx.detached() as dctx:
                     # The official rewrite needs to be in a detached
                     # scope to avoid collisions; this won't really
                     # recompile the whole thing, it will hit a cache
                     # of the view.
-                    ctx.env.type_rewrites[key] = dispatch.compile(qry, ctx=dctx)
-            rewrite_target = ctx.env.type_rewrites[key]
+                    return dispatch.compile(qry, ctx=dctx)
 
-            # We need to have the set with expr=None, so that the rewrite
-            # will be applied, but we also need to wrap it with a
-            # card_inference_override so that we use the real cardinality
-            # instead of assuming it is MANY.
-            assert isinstance(rewrite_target, irast.Set)
-            target = setgen.new_set_from_set(
+            target = _cache_as_type_rewrite(
                 target,
-                expr=irast.TypeRoot(
-                    typeref=target.typeref, is_cached_global=True
-                ),
+                setgen.get_set_type(target, ctx=ctx),
+                populate=_populate,
                 ctx=ctx,
             )
-            wrap = irast.SelectStmt(
-                result=target,
-                card_inference_override=rewrite_target,
-            )
-            target = setgen.new_set_from_set(target, expr=wrap, ctx=ctx)
 
         return target
 
-    default: Optional[s_expr.Expression] = glob.get_default(ctx.env.schema)
+    default_ql: Optional[qlast.Expr] = None
+    if isinstance(glob, s_globals.Global):
+        if default_expr := glob.get_default(ctx.env.schema):
+            default_ql = default_expr.parse()
 
     # If we are compiling with globals suppressed but still allowed, always
     # treat it as being empty.
     if ctx.env.options.make_globals_empty:
-        if default:
-            return dispatch.compile(default.parse(), ctx=ctx)
+        if isinstance(glob, s_permissions.Permission):
+            return dispatch.compile(qlast.Constant.boolean(False), ctx=ctx)
+        elif default_ql:
+            return dispatch.compile(default_ql, ctx=ctx)
         else:
             return setgen.new_empty_set(
-                stype=glob.get_target(ctx.env.schema), ctx=ctx)
+                stype=glob.get_target(ctx.env.schema), ctx=ctx
+            )
 
     objctx = ctx.env.options.schema_object_context
     if objctx in (s_constr.Constraint, s_indexes.Index):
@@ -668,12 +681,21 @@ def compile_GlobalExpr(
         ctx.env.options.func_params is None
         and not ctx.env.options.json_parameters
     ):
-        param_set, present_set = setgen.get_global_param_sets(glob, ctx=ctx)
+        param_set, present_set = setgen.get_global_param_sets(
+            glob, ctx=ctx,
+        )
     else:
         param_set, present_set = setgen.get_func_global_param_sets(
-            glob, ctx=ctx)
+            glob, ctx=ctx
+        )
 
-    if default and not present_set:
+        if isinstance(glob, s_permissions.Permission):
+            # Globals are assumed to be optional within functions. However,
+            # permissions always have a value. Provide a default value to
+            # reassure the cardinality checks.
+            default_ql = qlast.Constant.boolean(False)
+
+    if default_ql and not present_set:
         # If we have a default value and the global is required,
         # then we can use the param being {} as a signal to use
         # the default.
@@ -681,9 +703,12 @@ def compile_GlobalExpr(
             subctx.anchors = subctx.anchors.copy()
             main_param = subctx.maybe_create_anchor(param_set, 'glob')
             param_set = func.compile_operator(
-                expr, op_name='std::??',
-                qlargs=[main_param, default.parse()], ctx=subctx)
-    elif default and present_set:
+                expr,
+                op_name='std::??',
+                qlargs=[main_param, default_ql],
+                ctx=subctx
+            )
+    elif default_ql and present_set:
         # ... but if {} is a valid value for the global, we need to
         # stick in an extra parameter to indicate whether to use
         # the default.
@@ -694,10 +719,39 @@ def compile_GlobalExpr(
             present_param = subctx.maybe_create_anchor(present_set, 'present')
 
             param_set = func.compile_operator(
-                expr, op_name='std::IF',
-                qlargs=[main_param, present_param, default.parse()], ctx=subctx)
+                expr,
+                op_name='std::IF',
+                qlargs=[main_param, present_param, default_ql],
+                ctx=subctx
+            )
     elif not isinstance(param_set, irast.Set):
         param_set = dispatch.compile(param_set, ctx=ctx)
+
+    # When we are compiling a global as something we are pulling out
+    # of JSON, arrange to cache it as a type rewrite. This can have
+    # big performance wins.
+    if (
+        not ctx.env.options.schema_object_context
+        and not (
+            ctx.env.options.func_params is None
+            and not ctx.env.options.json_parameters
+        )
+        # TODO: support this for permissions too?
+        # OR! Don't put the permissions into the globals JSON?
+        and isinstance(glob, s_globals.Global)
+    ):
+        name = glob.get_name(ctx.env.schema)
+        if name not in ctx.env.query_globals_types:
+            # HACK: We have mechanism for caching based on type... so
+            # make up a type.
+            # I would like us to be less type-forward though.
+            ctx.env.query_globals_types[name] = (
+                schemactx.derive_view(glob.get_target(ctx.env.schema), ctx=ctx)
+            )
+        ty = ctx.env.query_globals_types[name]
+        param_set = _cache_as_type_rewrite(
+            param_set, ty, lambda: param_set, ctx=ctx
+        )
 
     return param_set
 
@@ -756,42 +810,16 @@ def compile_TypeCast(
         else:
             required = True
 
-        if ctx.env.options.json_parameters:
-            if param_name.isdecimal():
-                raise errors.QueryError(
-                    'queries compiled to accept JSON parameters do not '
-                    'accept positional parameters',
-                    span=expr.expr.span)
-
-            typeref = typegen.type_to_typeref(
-                ctx.env.get_schema_type_and_track(sn.QualName('std', 'json')),
-                env=ctx.env,
-            )
-
-            param = casts.compile_cast(
-                irast.Parameter(
-                    typeref=typeref,
-                    name=param_name,
-                    required=required,
-                    span=expr.expr.span,
-                ),
-                pt,
+        typeref = typegen.type_to_typeref(pt, env=ctx.env)
+        param = setgen.ensure_set(
+            irast.Parameter(
+                typeref=typeref,
+                name=param_name,
+                required=required,
                 span=expr.expr.span,
-                ctx=ctx,
-                cardinality_mod=expr.cardinality_mod,
-            )
-
-        else:
-            typeref = typegen.type_to_typeref(pt, env=ctx.env)
-            param = setgen.ensure_set(
-                irast.Parameter(
-                    typeref=typeref,
-                    name=param_name,
-                    required=required,
-                    span=expr.expr.span,
-                ),
-                ctx=ctx,
-            )
+            ),
+            ctx=ctx,
+        )
 
         if ex_param := ctx.env.script_params.get(param_name):
             # N.B. Accessing the schema_type from the param is unreliable

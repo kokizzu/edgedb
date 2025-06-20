@@ -6102,6 +6102,27 @@ class TestEdgeQLDataMigration(EdgeQLDataMigrationTestCase):
         """)
         await self.migrate(r"")
 
+    async def test_edgeql_migration_permissions_03a(self):
+        # Check tracing dependency works
+        await self.migrate(r"""
+          function test(x: int64) -> int64 {
+              using (x);
+              required_permissions := foo;
+          };
+          permission foo;
+       """)
+
+    async def test_edgeql_migration_permissions_03b(self):
+        # Check tracing dependency works
+        await self.migrate(r"""
+          function test(x: int64) -> int64 {
+              using (1);
+              required_permissions := {foo, bar};
+          };
+          permission foo;
+          permission bar;
+       """)
+
     async def test_edgeql_migration_index_01(self):
         await self.migrate('''
             type Message {
@@ -12326,7 +12347,7 @@ class TestEdgeQLDataMigrationNonisolated(EdgeQLDataMigrationTestCase):
         await self.migrate('')
 
     async def test_edgeql_migration_recovery_commit_fail(self):
-        con2 = await self.connect(database=self.con.dbname)
+        con2 = await self.connect()
         try:
             await con2.execute('START MIGRATION TO {}')
             await con2.execute('POPULATE MIGRATION')

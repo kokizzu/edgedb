@@ -1693,7 +1693,7 @@ class TestSQLQuery(tb.SQLQueryTestCase):
         )
 
     async def test_sql_query_be_state(self):
-        con = await self.connect(database=self.con.dbname)
+        con = await self.connect()
         try:
             await con.execute(
                 '''
@@ -3477,6 +3477,20 @@ class TestSQLQueryNonTransactional(tb.SQLQueryTestCase):
         await self.scon.execute("ROLLBACK")
         v2 = await self.scon.fetchval("SHOW transaction_isolation")
         self.assertNotEqual(v1, v2)
+
+    async def test_sql_transaction_03(self):
+        self.assertEqual(
+            await self.scon.execute("BEGIN"),
+            "BEGIN",
+        )
+        await self.scon.execute("ROLLBACK")
+
+    async def test_sql_transaction_04(self):
+        self.assertEqual(
+            await self.scon.execute("START TRANSACTION"),
+            "START TRANSACTION",
+        )
+        await self.scon.execute("ROLLBACK")
 
     async def test_sql_query_error_11(self):
         # extended query protocol
